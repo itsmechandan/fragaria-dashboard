@@ -1,104 +1,249 @@
+// src/pages/NodePage.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { listenDayReadingsForNode, type Snap } from "../app/rtdb";
+import { db } from "../app/firebase";
+import { get, ref } from "firebase/database";
+import * as XLSX from "xlsx";
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from "recharts";
 
-const brand = "#0094fe";
+type Row = {
+  t_utc: number;        // epoch seconds (gateway writes this)
+  node_id: number;
+  co2_ppm: number;
+  t_c: number;
+  rh_pct: number;
+  light_lux?: number | null;
+  batt?: number;
+  rssi?: number;
+};
 
-function fmtIST(epochSec: number) {
-  return new Intl.DateTimeFormat("en-IN", {
+// ---- tweak if your gateway id changes
+const GATEWAY_ID = "GW01";
+const BRAND = "#0094fe";
+
+// util: today as UTC "YYYY-MM-DD" (your RTDB uses UTC buckets)
+const todayUtc = () => new Date().toISOString().slice(0, 10);
+
+// util: pretty IST time
+const toISTTime = (sec: number) =>
+  new Date(sec * 1000).toLocaleTimeString("en-IN", {
     timeZone: "Asia/Kolkata",
-    dateStyle: "medium",
-    timeStyle: "medium",
-  }).format(new Date(epochSec * 1000));
-}
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+// util: pretty IST date+time
+const toISTDateTime = (sec: number) =>
+  new Date(sec * 1000).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+  });
 
 export default function NodePage() {
-  const { id } = useParams();
-  const nodeId = Number(id);
-  const [rows, setRows] = useState<Snap[]>([]);
+  const { nodeId = "1" } = useParams();
+
+  const [date, setDate] = useState<string>(todayUtc);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [metric, setMetric] = useState<
+    "co2_ppm" | "t_c" | "rh_pct" | "light_lux" | "batt"
+  >("co2_ppm");
 
   useEffect(() => {
-    const unsub = listenDayReadingsForNode("GW01", nodeId, setRows);
-    return () => unsub();
-  }, [nodeId]);
+    loadDay();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, nodeId]);
 
-  const newest = rows[0];
-  const summary = useMemo(() => {
-    if (!rows.length) return null;
-    const avg = (pick: (r: Snap) => number | null | undefined) => {
-      const vals = rows.map(pick).map(Number).filter((n) => Number.isFinite(n));
-      if (!vals.length) return NaN;
-      return vals.reduce((a, b) => a + b, 0) / vals.length;
-    };
-    return {
-      co2: avg((r) => r.co2_ppm),
-      t: avg((r) => r.t_c),
-      rh: avg((r) => r.rh_pct),
-      lux: avg((r) => r.light_lux ?? NaN),
-    };
-  }, [rows]);
+  async function loadDay() {
+    setLoading(true);
+    try {
+      const snap = await get(ref(db, `readings/${GATEWAY_ID}/${date}`));
+      const list: Row[] = [];
+      if (snap.exists()) {
+        snap.forEach((c) => {
+          const v = c.val() as Row;
+          if (String(v.node_id) === String(nodeId)) list.push(v);
+        });
+      }
+      list.sort((a, b) => a.t_utc - b.t_utc);
+      setRows(list);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Graph data
+  const chartData = useMemo(
+    () =>
+      rows.map((r) => ({
+        time: toISTTime(r.t_utc),
+        co2_ppm: r.co2_ppm,
+        t_c: r.t_c,
+        rh_pct: r.rh_pct,
+        light_lux: r.light_lux ?? 0,
+        batt: r.batt ?? 0,
+      })),
+    [rows]
+  );
+
+  // Excel export
+  function exportExcel() {
+    const data = rows.map((r) => ({
+      Time_IST: toISTDateTime(r.t_utc),
+      CO2_ppm: r.co2_ppm,
+      Temp_C: r.t_c,
+      RH_pct: r.rh_pct,
+      Lux: r.light_lux ?? null,
+      Battery: r.batt ?? null,
+      RSSI: r.rssi ?? null,
+    }));
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Readings");
+    XLSX.writeFile(wb, `node-${nodeId}-${date}.xlsx`);
+  }
 
   return (
-    <div style={{ fontFamily: "Inter, system-ui, Arial", padding: 16 }}>
-      <div style={{ marginBottom: 10 }}>
-        <Link to="/" style={{ textDecoration: "none", color: brand }}>← Overview</Link>
-      </div>
-      <h1 style={{ color: brand, marginBottom: 6 }}>
-        Gateway: GW01 • Node {nodeId}
-      </h1>
-      <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 16 }}>
-        {newest ? `Newest: ${fmtIST(newest.t_utc)}` : "Waiting for data…"}
-      </div>
+    <>
+      <style>{`
+        body{ background:#000; color:#e5e7eb; }
+        .wrap{ max-width:1200px; margin:0 auto; padding:20px 14px 40px; font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial,"Noto Sans",sans-serif;}
+        .top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+        .title{ display:flex; align-items:center; gap:10px; }
+        h1{ margin:0; font-size:28px; font-weight:900; color:${BRAND}; }
+        a{ color:#e5e7eb; text-decoration:none; }
+        .card{ background:#0b0f19; border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:14px; }
+        .controls{ display:flex; gap:10px; align-items:center; margin:12px 0 16px; flex-wrap:wrap; }
+        input[type="date"], select{
+          background:#0b0f19; color:#e5e7eb; border:1px solid rgba(255,255,255,.2); border-radius:10px; padding:8px 10px;
+        }
+        .btn{ background:#111827; color:#e5e7eb; border:1px solid rgba(255,255,255,.18); padding:8px 12px; border-radius:10px; cursor:pointer; }
+        .btn.brand{ background:${BRAND}; color:#fff; border-color:${BRAND}; }
+        table{ width:100%; border-collapse:separate; border-spacing:0 8px; }
+        th,td{ padding:10px 12px; }
+        th{ color:#a7b0be; font-weight:600; text-align:left; font-size:12px; letter-spacing:.02em;}
+        tbody tr{ background:#0b0f19; border:1px solid rgba(255,255,255,.1); }
+        tbody tr td:first-child{ border-top-left-radius:10px; border-bottom-left-radius:10px; }
+        tbody tr td:last-child { border-top-right-radius:10px; border-bottom-right-radius:10px; }
+        .grid{ display:grid; grid-template-columns: 1fr; gap:14px; }
+        .chartCard{ height:340px; }
+        .muted{ color:#94a3b8; font-size:12px; }
+      `}</style>
 
-      {/* Summary chips */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 14 }}>
-        <Chip label="Avg CO₂ (ppm)" value={summary ? summary.co2 : NaN} />
-        <Chip label="Avg Temp (°C)" value={summary ? summary.t : NaN} />
-        <Chip label="Avg RH (%)" value={summary ? summary.rh : NaN} />
-        <Chip label="Avg Lux" value={summary ? summary.lux : NaN} />
-      </div>
+      <div className="wrap">
+        <div className="top">
+          <div className="title">
+            <h1>Node {nodeId} — Readings</h1>
+          </div>
+          <Link to="/">← Back to Overview</Link>
+        </div>
 
-      {/* Table */}
-      <div style={{ border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden", background: "#fff" }}>
-        <div style={{ maxHeight: 520, overflow: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
-            <thead style={{ position: "sticky", top: 0, background: "#f8fafc", zIndex: 1 }}>
-              <tr>
-                {["Time (IST)", "CO₂ (ppm)", "Temp (°C)", "RH (%)", "Lux", "Battery", "Flags"].map((h) => (
-                  <th key={h} style={{ textAlign: "left", padding: "10px 12px", fontWeight: 600, color: "#334155", borderBottom: "1px solid #e2e8f0" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length ? rows.map((r, i) => (
-                <tr key={`${r.t_utc}-${i}`} style={{ background: i % 2 ? "#fbfdff" : "#fff" }}>
-                  <td style={td}>{fmtIST(r.t_utc)}</td>
-                  <td style={td}>{r.co2_ppm}</td>
-                  <td style={td}>{r.t_c?.toFixed(2)}</td>
-                  <td style={td}>{r.rh_pct?.toFixed(2)}</td>
-                  <td style={td}>{r.light_lux ?? "—"}</td>
-                  <td style={td}>{r.batt ?? "—"}</td>
-                  <td style={td}>{"0x" + ((r.flags ?? 0) & 0xff).toString(16).padStart(2, "0").toUpperCase()}</td>
-                </tr>
-              )) : (
-                <tr><td style={{ padding: 14 }} colSpan={7}>No readings yet for today.</td></tr>
-              )}
-            </tbody>
-          </table>
+        {/* Controls */}
+        <div className="controls">
+          <label className="muted">Date (UTC)</label>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+          />
+          <label className="muted" style={{ marginLeft: 6 }}>
+            Metric
+          </label>
+          <select
+            value={metric}
+            onChange={(e) =>
+              setMetric(e.target.value as
+                | "co2_ppm"
+                | "t_c"
+                | "rh_pct"
+                | "light_lux"
+                | "batt")
+            }
+          >
+            <option value="co2_ppm">CO₂ (ppm)</option>
+            <option value="t_c">Temp (°C)</option>
+            <option value="rh_pct">RH (%)</option>
+            <option value="light_lux">Lux</option>
+            <option value="batt">Battery</option>
+          </select>
+
+          <button className="btn" onClick={loadDay} disabled={loading}>
+            {loading ? "Loading…" : "Refresh"}
+          </button>
+          <button className="btn brand" onClick={exportExcel} disabled={!rows.length}>
+            Export to Excel
+          </button>
+        </div>
+
+        <div className="grid">
+          {/* Chart */}
+          <div className="card chartCard">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData} margin={{ top: 10, right: 18, left: -8, bottom: 8 }}>
+                <CartesianGrid stroke="rgba(255,255,255,.06)" />
+                <XAxis dataKey="time" tick={{ fill: "#cbd5e1" }} />
+                <YAxis tick={{ fill: "#cbd5e1" }} />
+                <Tooltip
+                  contentStyle={{ background: "#0b0f19", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10 }}
+                  labelStyle={{ color: "#cbd5e1" }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey={metric}
+                  stroke={BRAND}
+                  strokeWidth={2.5}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Table */}
+          <div className="card">
+            <div className="muted" style={{ marginBottom: 8 }}>
+              {rows.length
+                ? `Showing ${rows.length} rows for ${date} (UTC)`
+                : "No rows for this date / node"}
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time (IST)</th>
+                    <th>CO₂ (ppm)</th>
+                    <th>Temp (°C)</th>
+                    <th>RH (%)</th>
+                    <th>Lux</th>
+                    <th>Battery</th>
+                    <th>RSSI</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={`${r.t_utc}_${r.node_id}`}>
+                      <td>{toISTDateTime(r.t_utc)}</td>
+                      <td>{r.co2_ppm}</td>
+                      <td>{r.t_c}</td>
+                      <td>{r.rh_pct}</td>
+                      <td>{r.light_lux ?? "—"}</td>
+                      <td>{r.batt ?? "—"}</td>
+                      <td>{r.rssi ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
-  );
-}
-
-const td: React.CSSProperties = { padding: "10px 12px", borderBottom: "1px solid #f1f5f9", color: "#0f172a" };
-
-function Chip({ label, value }: { label: string; value: number }) {
-  const txt = Number.isFinite(value) ? value.toFixed(1) : "—";
-  return (
-    <div style={{ border: "1px solid #e2e8f0", borderRadius: 14, padding: 12, background: "#fff" }}>
-      <div style={{ fontSize: 12, color: brand }}>{label}</div>
-      <div style={{ fontSize: 20, fontWeight: 700, color: brand }}>{txt}</div>
-    </div>
+    </>
   );
 }
