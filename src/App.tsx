@@ -178,7 +178,7 @@ export default function App() {
   }, [selectedNode, metric]);
 
   const avg = avgByNode[selectedNode] || {};
-  const lastTs = latest[selectedNode]?.t_utc;
+
 
   const FbBadge = (
     <div

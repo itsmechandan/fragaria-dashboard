@@ -12,24 +12,24 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
+  ReferenceLine,
 } from "recharts";
 
 type Row = {
-  t_utc: number;        // epoch seconds (gateway writes this)
+  t_utc: number;              // epoch seconds
   node_id: number;
-  co2_ppm: number;
-  t_c: number;
-  rh_pct: number;
+  co2_ppm?: number;
+  t_c?: number;
+  rh_pct?: number;
   light_lux?: number | null;
   batt?: number;
   rssi?: number;
 };
 
-// ---- tweak if your gateway id changes
 const GATEWAY_ID = "GW01";
 const BRAND = "#0094fe";
 
-// util: today as UTC "YYYY-MM-DD" (your RTDB uses UTC buckets)
+// util: today as UTC "YYYY-MM-DD"
 const todayUtc = () => new Date().toISOString().slice(0, 10);
 
 // util: pretty IST time
@@ -42,9 +42,7 @@ const toISTTime = (sec: number) =>
 
 // util: pretty IST date+time
 const toISTDateTime = (sec: number) =>
-  new Date(sec * 1000).toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-  });
+  new Date(sec * 1000).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 
 export default function NodePage() {
   const { nodeId = "1" } = useParams();
@@ -79,7 +77,7 @@ export default function NodePage() {
     }
   }
 
-  // Graph data
+  // Chart data (IST time on X)
   const chartData = useMemo(
     () =>
       rows.map((r) => ({
@@ -93,13 +91,43 @@ export default function NodePage() {
     [rows]
   );
 
+  // Daily average for the selected metric (horizontal line)
+  const avgValue = useMemo(() => {
+    const vals = rows
+      .map((r) =>
+        metric === "co2_ppm"
+          ? r.co2_ppm
+          : metric === "t_c"
+          ? r.t_c
+          : metric === "rh_pct"
+          ? r.rh_pct
+          : metric === "light_lux"
+          ? r.light_lux ?? undefined
+          : r.batt
+      )
+      .filter((v): v is number => typeof v === "number" && !Number.isNaN(v));
+    if (!vals.length) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }, [rows, metric]);
+
+  const unit =
+    metric === "co2_ppm"
+      ? "ppm"
+      : metric === "t_c"
+      ? "°C"
+      : metric === "rh_pct"
+      ? "%"
+      : metric === "light_lux"
+      ? "lux"
+      : "";
+
   // Excel export
   function exportExcel() {
     const data = rows.map((r) => ({
       Time_IST: toISTDateTime(r.t_utc),
-      CO2_ppm: r.co2_ppm,
-      Temp_C: r.t_c,
-      RH_pct: r.rh_pct,
+      CO2_ppm: r.co2_ppm ?? null,
+      Temp_C: r.t_c ?? null,
+      RH_pct: r.rh_pct ?? null,
       Lux: r.light_lux ?? null,
       Battery: r.batt ?? null,
       RSSI: r.rssi ?? null,
@@ -133,8 +161,9 @@ export default function NodePage() {
         tbody tr td:first-child{ border-top-left-radius:10px; border-bottom-left-radius:10px; }
         tbody tr td:last-child { border-top-right-radius:10px; border-bottom-right-radius:10px; }
         .grid{ display:grid; grid-template-columns: 1fr; gap:14px; }
-        .chartCard{ height:340px; }
+        .chartCard{ height:360px; }
         .muted{ color:#94a3b8; font-size:12px; }
+        .avgBadge{ color:#94a3b8; font-size:12px; margin-left:6px; }
       `}</style>
 
       <div className="wrap">
@@ -159,12 +188,9 @@ export default function NodePage() {
           <select
             value={metric}
             onChange={(e) =>
-              setMetric(e.target.value as
-                | "co2_ppm"
-                | "t_c"
-                | "rh_pct"
-                | "light_lux"
-                | "batt")
+              setMetric(
+                e.target.value as "co2_ppm" | "t_c" | "rh_pct" | "light_lux" | "batt"
+              )
             }
           >
             <option value="co2_ppm">CO₂ (ppm)</option>
@@ -173,6 +199,10 @@ export default function NodePage() {
             <option value="light_lux">Lux</option>
             <option value="batt">Battery</option>
           </select>
+
+          <span className="avgBadge">
+            Avg today: {avgValue !== null ? `${avgValue.toFixed(2)} ${unit}` : "—"}
+          </span>
 
           <button className="btn" onClick={loadDay} disabled={loading}>
             {loading ? "Loading…" : "Refresh"}
@@ -186,12 +216,19 @@ export default function NodePage() {
           {/* Chart */}
           <div className="card chartCard">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 10, right: 18, left: -8, bottom: 8 }}>
+              <LineChart
+                data={chartData}
+                margin={{ top: 10, right: 18, left: -8, bottom: 8 }}
+              >
                 <CartesianGrid stroke="rgba(255,255,255,.06)" />
                 <XAxis dataKey="time" tick={{ fill: "#cbd5e1" }} />
                 <YAxis tick={{ fill: "#cbd5e1" }} />
                 <Tooltip
-                  contentStyle={{ background: "#0b0f19", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10 }}
+                  contentStyle={{
+                    background: "#0b0f19",
+                    border: "1px solid rgba(255,255,255,.15)",
+                    borderRadius: 10,
+                  }}
                   labelStyle={{ color: "#cbd5e1" }}
                 />
                 <Line
@@ -202,6 +239,15 @@ export default function NodePage() {
                   dot={false}
                   isAnimationActive={false}
                 />
+                {/* Daily average horizontal line */}
+                {avgValue !== null && (
+                  <ReferenceLine
+                    y={avgValue}
+                    stroke="#94a3b8"
+                    strokeDasharray="4 4"
+                    ifOverflow="extendDomain"
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -230,9 +276,9 @@ export default function NodePage() {
                   {rows.map((r) => (
                     <tr key={`${r.t_utc}_${r.node_id}`}>
                       <td>{toISTDateTime(r.t_utc)}</td>
-                      <td>{r.co2_ppm}</td>
-                      <td>{r.t_c}</td>
-                      <td>{r.rh_pct}</td>
+                      <td>{r.co2_ppm ?? "—"}</td>
+                      <td>{r.t_c ?? "—"}</td>
+                      <td>{r.rh_pct ?? "—"}</td>
                       <td>{r.light_lux ?? "—"}</td>
                       <td>{r.batt ?? "—"}</td>
                       <td>{r.rssi ?? "—"}</td>
